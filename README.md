@@ -12,7 +12,7 @@ Every colour comes with a name, a hex code and three words of questionable meani
 
 The weather comes from [MET Norway](https://api.met.no), which is the data behind yr.no and covers the whole world, and the aurora forecast comes from [NOAA](https://www.swpc.noaa.gov). Sunrise, sunset and how high the sun is are calculated locally.
 
-It is one swift file with no dependencies. It uses Core Image for the gradients, Core Text for the type, and Helvetica Neue because it already ships with macOS.
+It is plain swift with no dependencies, split into a handful of files. It uses Core Image for the gradients, Core Text for the type, and Helvetica Neue because it already ships with macOS.
 
 ## Install
 
@@ -66,7 +66,14 @@ To render to a folder without touching your wallpaper:
 
 ## Changing it
 
-Everything is in [`daywall.swift`](daywall.swift). The colours are in `palettes`, each with a name, hex, mood words, a base colour, the colours that get blurred together and which weather it belongs to. The clear sky colours are the `sky…` palettes right below, which also say how high up on the screen each colour sits, and `skyPalette` decides at which sun height each one takes over. The layout is in `render`. Run `./install.sh` again afterwards to recompile.
+The code is in [`Sources`](Sources):
+
+- `Palettes.swift` has the colours, one per line with a name, hex, mood words, a base colour, the colours that get blurred together and which weather it belongs to. The clear sky ones are the `sky…` palettes, which also say how high up on the screen each colour sits, and `skyPalette` decides at which sun height each one takes over.
+- `Layout.swift` draws the four columns, one function each.
+- `Fetch.swift` gets the weather, prices and aurora forecast, `Agenda.swift` reads the calendar, `Astronomy.swift` does the sun and moon, and `Background.swift` paints the gradient.
+- `main.swift` ties it together, `Config.swift` has the settings and `System.swift` sets the wallpaper and runs the watcher.
+
+Run `./install.sh` again afterwards to recompile.
 
 ## Uninstall
 
