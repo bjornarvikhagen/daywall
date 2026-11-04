@@ -1,0 +1,12 @@
+# build output
+/daywall
+
+# runtime data (never commit: calendar URL and cached meetings are private)
+calendar-url
+calendar.ics
+weather.json
+quotes.json
+last-signature
+wall-*.jpg
+*.log
+.DS_Store
