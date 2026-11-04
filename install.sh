@@ -21,7 +21,9 @@ command -v swiftc >/dev/null || { echo "swiftc not found. Install the Xcode Comm
 
 mkdir -p "$DIR" "$HOME/Library/LaunchAgents"
 echo "Compiling…"
-swiftc -O "$SRC/daywall.swift" -o "$DIR/daywall"
+swiftc -O "$SRC"/Sources/*.swift -o "$DIR/daywall.new"
+# Swap the binary in with a rename: overwriting it in place while the watcher runs gets it killed.
+mv -f "$DIR/daywall.new" "$DIR/daywall"
 
 if [ -n "${DAYWALL_ICS:-}" ]; then
   (umask 077; printf '%s\n' "$DAYWALL_ICS" > "$DIR/calendar-url")
