@@ -6,6 +6,9 @@ calendar-url
 calendar.ics
 weather.json
 met.json
+kp.json
+last-files
+last-appearance
 quotes.json
 last-signature
 wall-*.jpg

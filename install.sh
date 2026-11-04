@@ -1,12 +1,15 @@
 #!/bin/bash
-# Builds Daywall and installs a LaunchAgent that refreshes the wallpaper every 15 minutes
-# (it only re-renders when something changed).
+# Builds Daywall and installs a LaunchAgent that keeps it running in the background. It redraws
+# every 5 minutes, right after waking from sleep and when displays change, and re-applies the
+# wallpaper when you switch Space.
 #
 # Optional settings, passed as environment variables:
 #   DAYWALL_LOCATION="Oslo"                          weather location (default: locate by IP)
 #   DAYWALL_ICS="https://…/calendar.ics"             calendar feed for the week agenda
 #   DAYWALL_TICKERS="Bitcoin=BTC-USD,Nasdaq 100=^NDX" market quotes (Yahoo Finance symbols)
 #   DAYWALL_HERO="digit"                             digit | daylight | moon | next | year
+#   DAYWALL_LANG="nb"                                Norwegian labels (default English)
+#   DAYWALL_DARK_MODE=1                              switch macOS to dark mode after sunset
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
@@ -27,7 +30,7 @@ fi
 
 xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 ENV=""
-for v in DAYWALL_LOCATION DAYWALL_TICKERS DAYWALL_HERO; do
+for v in DAYWALL_LOCATION DAYWALL_TICKERS DAYWALL_HERO DAYWALL_LANG DAYWALL_DARK_MODE; do
   if [ -n "${!v:-}" ]; then ENV+="    <key>$v</key><string>$(xml "${!v}")</string>"$'\n'; fi
 done
 
@@ -37,12 +40,12 @@ cat > "$PL" <<PLIST
 <plist version="1.0">
 <dict>
   <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$DIR/daywall</string></array>
+  <key>ProgramArguments</key><array><string>$DIR/daywall</string><string>--watch</string></array>
   <key>EnvironmentVariables</key>
   <dict>
 $ENV  </dict>
   <key>RunAtLoad</key><true/>
-  <key>StartInterval</key><integer>900</integer>
+  <key>KeepAlive</key><true/>
   <key>StandardErrorPath</key><string>$DIR/daywall.log</string>
   <key>ProcessType</key><string>Background</string>
 </dict>

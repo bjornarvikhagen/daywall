@@ -1,12 +1,16 @@
 // Daywall — calendar wallpaper whose colour follows the day and the weather.
 //
-// Usage: daywall [--force] [--preview DIR] [--size WxH] [--date yyyy-MM-dd]
-//                [--weather clear|partly|cloudy|rain|snow|fog|storm] [--night|--day]
-//                [--location "Bergen"] [--hero digit|daylight|moon|next|year]
+// Usage: daywall [--force] [--preview DIR] [--size WxH] [--date yyyy-MM-dd] [--at "yyyy-MM-dd HH:mm"]
+//                [--weather clear|partly|cloudy|rain|snow|fog|storm] [--night|--day] [--kp N]
+//                [--location "Bergen"] [--hero digit|daylight|moon|next|year] [--lang nb] [--dump-agenda]
+//        daywall --watch     stay running: redraw every 5 min, after wake, on display/Space changes
+//        daywall --reapply   put the latest images back on the current Space
 // Env:   DAYWALL_LOCATION  wttr.in location; empty = locate by IP
 //        DAYWALL_TICKERS   "Label=YahooSymbol,..." (default Bitcoin + Nasdaq 100)
 //        DAYWALL_HERO      what fills the second column (default: digit)
 //        DAYWALL_ICS       calendar ICS URL (otherwise read from <data dir>/calendar-url)
+//        DAYWALL_LANG      nb = Norwegian labels (default English)
+//        DAYWALL_DARK_MODE 1 = switch macOS to dark mode at sunset, light at sunrise
 //        DAYWALL_DIR       data directory (default ~/Library/Application Support/Daywall)
 
 import AppKit
@@ -43,6 +47,24 @@ if let d = arg("--date") {
     if let parsed = f.date(from: d) { date = parsed.addingTimeInterval(12 * 3600) }
 }
 let location = arg("--location") ?? ProcessInfo.processInfo.environment["DAYWALL_LOCATION"] ?? ""
+
+// MARK: - Language (DAYWALL_LANG=nb for Norwegian, default English)
+
+let nb = (arg("--lang") ?? ProcessInfo.processInfo.environment["DAYWALL_LANG"] ?? "en").lowercased().hasPrefix("n")
+let uiLocale = Locale(identifier: nb ? "nb_NO" : "en_US")
+let nbStrings: [String: String] = [
+    "Week": "Uke", "Markets": "Marked", "Feels like": "Føles som", "No meetings": "Ingen møter",
+    "All day": "Hele dagen", "Untitled": "Uten tittel", "This week": "Denne uken", "Next week": "Neste uke",
+    "now": "nå", "in": "om", "Daylight": "Dagslys", "min since yesterday": "min siden i går",
+    "New moon": "Nymåne", "Waxing crescent": "Voksende månesigd", "First quarter": "Første kvarter",
+    "Waxing gibbous": "Voksende måne", "Full moon": "Fullmåne", "Waning gibbous": "Avtagende måne",
+    "Last quarter": "Siste kvarter", "Waning crescent": "Avtagende månesigd", "illuminated": "opplyst",
+    "Full moon tonight": "Fullmåne i kveld", "Next meeting": "Neste møte", "Tomorrow": "I morgen",
+    "No more meetings": "Ingen flere møter", "Free": "Ledig",
+    "Aurora possible tonight": "Mulig nordlys i kveld", "Aurora likely tonight": "Nordlys sannsynlig i kveld",
+]
+func L(_ en: String) -> String { nb ? (nbStrings[en] ?? en) : en }
+func capFirst(_ s: String) -> String { s.prefix(1).uppercased() + s.dropFirst() }
 
 func log(_ s: String) {
     FileHandle.standardError.write("[\(ISO8601DateFormatter().string(from: Date()))] \(s)\n".data(using: .utf8)!)
@@ -316,7 +338,22 @@ func metCategory(_ s: String) -> String {
     }
 }
 
+let metNorwegian: [String: String] = [
+    "clearsky": "Klarvær", "fair": "Lettskyet", "partlycloudy": "Delvis skyet", "cloudy": "Skyet", "fog": "Tåke",
+    "rain": "Regn", "lightrain": "Lett regn", "heavyrain": "Kraftig regn",
+    "rainshowers": "Regnbyger", "lightrainshowers": "Lette regnbyger", "heavyrainshowers": "Kraftige regnbyger",
+    "sleet": "Sludd", "lightsleet": "Lett sludd", "heavysleet": "Kraftig sludd",
+    "sleetshowers": "Sluddbyger", "lightsleetshowers": "Lette sluddbyger", "heavysleetshowers": "Kraftige sluddbyger",
+    "snow": "Snø", "lightsnow": "Lett snø", "heavysnow": "Kraftig snø",
+    "snowshowers": "Snøbyger", "lightsnowshowers": "Lette snøbyger", "heavysnowshowers": "Kraftige snøbyger",
+]
+
 func metDescription(_ s: String) -> String {
+    if nb {
+        let thunder = s.hasSuffix("andthunder")
+        let core = thunder ? String(s.dropLast("andthunder".count)) : s
+        if let n = metNorwegian[core] { return thunder ? n + " og torden" : n }
+    }
     let fixed = ["clearsky": "Clear sky", "fair": "Fair", "partlycloudy": "Partly cloudy", "cloudy": "Cloudy", "fog": "Fog"]
     if let f = fixed[s] { return f }
     var d = s.replacingOccurrences(of: "andthunder", with: " and thunder")
@@ -529,7 +566,7 @@ func meetings(from ics: String, in window: DateInterval) -> [Meeting] {
     func add(_ e: VEvent, _ s: Date, _ en: Date) {
         guard s < window.end, en > window.start || (en == s && s >= window.start) else { return }
         var t = e.summary.trimmingCharacters(in: .whitespaces)
-        if t.rangeOfCharacter(from: .alphanumerics) == nil { t = "Untitled" }
+        if t.rangeOfCharacter(from: .alphanumerics) == nil { t = L("Untitled") }
         if t.hasPrefix("Canceled:") || t.hasPrefix("Cancelled:") || t.hasPrefix("Avlyst:") { return }
         out.append(Meeting(title: t, start: s, end: en, allDay: e.allDay, free: e.busy == "FREE"))
     }
@@ -556,9 +593,15 @@ func meetings(from ics: String, in window: DateInterval) -> [Meeting] {
             return true
         }
 
+        let codes = ["SU": 1, "MO": 2, "TU": 3, "WE": 4, "TH": 5, "FR": 6, "SA": 7]
+        func at(_ day: Date) -> Date? {
+            var dc = cal.dateComponents([.year, .month, .day], from: day)
+            dc.hour = time.hour; dc.minute = time.minute; dc.second = time.second
+            return cal.date(from: dc)
+        }
+
         switch rule["FREQ"] {
         case "WEEKLY":
-            let codes = ["SU": 1, "MO": 2, "TU": 3, "WE": 4, "TH": 5, "FR": 6, "SA": 7]
             let days = (rule["BYDAY"]?.split(separator: ",").compactMap { codes[String($0.suffix(2))] }
                 ?? [cal.component(.weekday, from: s)]).sorted { (($0 + 5) % 7) < (($1 + 5) % 7) }
             var weekStart = cal.dateInterval(of: .weekOfYear, for: s)!.start
@@ -572,10 +615,64 @@ func meetings(from ics: String, in window: DateInterval) -> [Meeting] {
                 }
                 weekStart = cal.date(byAdding: .weekOfYear, value: interval, to: weekStart)!
             }
-        case "DAILY", "MONTHLY", "YEARLY":
-            let unit: Calendar.Component = rule["FREQ"] == "DAILY" ? .day : rule["FREQ"] == "MONTHLY" ? .month : .year
+        case "DAILY":
+            // FREQ=DAILY;BYDAY=MO,TU,… only keeps those weekdays.
+            let allowed = rule["BYDAY"].map { Set($0.split(separator: ",").compactMap { codes[String($0.suffix(2))] }) }
             var i = 0
-            while let occ = cal.date(byAdding: unit, value: i * interval, to: s), emit(occ) { i += 1 }
+            while let occ = cal.date(byAdding: .day, value: i * interval, to: s), occ <= window.end {
+                i += 1
+                if let allowed, !allowed.contains(cal.component(.weekday, from: occ)) { continue }
+                if !emit(occ) { break }
+            }
+        case "MONTHLY", "YEARLY":
+            // Handles BYDAY with ordinals ("2TU", "-1FR"), BYSETPOS, BYMONTHDAY (incl. negative) and BYMONTH.
+            let yearly = rule["FREQ"] == "YEARLY"
+            let byMonth = rule["BYMONTH"].map { Set($0.split(separator: ",").compactMap { Int($0) }) }
+            let byMonthDay = rule["BYMONTHDAY"]?.split(separator: ",").compactMap { Int($0) }
+            let setPos = rule["BYSETPOS"].flatMap { Int($0) }
+            let byDay: [(ord: Int?, wd: Int)]? = rule["BYDAY"]?.split(separator: ",").compactMap { tok in
+                let t = String(tok)
+                guard let wd = codes[String(t.suffix(2))] else { return nil }
+                return (Int(t.dropLast(2)) ?? setPos, wd)
+            }
+            let startMonth = cal.date(from: cal.dateComponents([.year, .month], from: s))!
+            let startDay = cal.component(.day, from: s), startM = cal.component(.month, from: s)
+            var monthStart = startMonth
+            var guardCount = 0
+            loop: while monthStart <= window.end && guardCount < 2400 {
+                guardCount += 1
+                defer { monthStart = cal.date(byAdding: .month, value: 1, to: monthStart)! }
+                let monthsIn = cal.dateComponents([.month], from: startMonth, to: monthStart).month ?? 0
+                let m = cal.component(.month, from: monthStart)
+                if yearly {
+                    guard (monthsIn / 12) % interval == 0, byMonth?.contains(m) ?? (m == startM) else { continue }
+                } else {
+                    guard monthsIn % interval == 0 else { continue }
+                }
+                let n = cal.range(of: .day, in: .month, for: monthStart)!.count
+                let all = (0..<n).map { cal.date(byAdding: .day, value: $0, to: monthStart)! }
+                var picks: [Date] = []
+                if let byDay {
+                    for (ord, wd) in byDay {
+                        let matches = all.filter { cal.component(.weekday, from: $0) == wd }
+                        if let o = ord {
+                            let idx = o > 0 ? o - 1 : matches.count + o
+                            if matches.indices.contains(idx) { picks.append(matches[idx]) }
+                        } else {
+                            picks += matches
+                        }
+                    }
+                } else {
+                    for d in byMonthDay ?? [startDay] {
+                        let idx = d > 0 ? d - 1 : n + d
+                        if all.indices.contains(idx) { picks.append(all[idx]) }
+                    }
+                }
+                for day in picks.sorted() {
+                    guard let occ = at(day), occ >= s else { continue }
+                    if !emit(occ) { break loop }
+                }
+            }
         default:
             add(e, s, en)
         }
@@ -633,7 +730,9 @@ struct SplitMix {
 
 let ciContext = CIContext(options: [.workingColorSpace: sRGB, .outputColorSpace: sRGB])
 
-func renderBackground(_ p: Palette, w: Int, h: Int, seed: UInt64) -> CGImage {
+/// `seed` fixes the layout for the day; `drift` (fraction of the day, 0–1) slowly moves the blobs
+/// so the background breathes over the day instead of jumping.
+func renderBackground(_ p: Palette, w: Int, h: Int, seed: UInt64, drift: CGFloat, fog: Bool) -> CGImage {
     let extent = CGRect(x: 0, y: 0, width: w, height: h)
     let W = CGFloat(w), H = CGFloat(h)
     let diag = (W * W + H * H).squareRoot()
@@ -646,8 +745,10 @@ func renderBackground(_ p: Palette, w: Int, h: Int, seed: UInt64) -> CGImage {
         let c = p.blobs[i]
         // spread blobs across the width so the whole screen gets variation
         let slot = (CGFloat(k) + rng.range(0.1, 0.9)) / CGFloat(order.count)
-        let x = (slot * 1.3 - 0.15) * W
+        let ph1 = rng.range(0, 2 * .pi), ph2 = rng.range(0, 2 * .pi)
+        let x = (slot * 1.3 - 0.15) * W + 0.06 * W * sin(2 * .pi * drift * 3 + ph1)
         let y = (p.ys.map { $0[i] + rng.range(-0.05, 0.05) } ?? rng.range(-0.15, 1.15)) * H
+            + (p.ys == nil ? 0.06 : 0.02) * H * cos(2 * .pi * drift * 2 + ph2)
         let r = rng.range(0.22, 0.40) * diag
         let g = CIFilter(name: "CIGaussianGradient", parameters: [
             "inputCenter": CIVector(x: x, y: y),
@@ -658,6 +759,10 @@ func renderBackground(_ p: Palette, w: Int, h: Int, seed: UInt64) -> CGImage {
         img = g.composited(over: img)
     }
     img = img.clampedToExtent().applyingGaussianBlur(sigma: Double(min(W, H)) * 0.04).cropped(to: extent)
+    if fog {  // softer and paler, like looking through mist
+        img = img.clampedToExtent().applyingGaussianBlur(sigma: Double(min(W, H)) * 0.06).cropped(to: extent)
+        img = CIImage(color: CIColor(red: 1, green: 1, blue: 1, alpha: 0.16)).cropped(to: extent).composited(over: img)
+    }
 
     // Fine film grain via soft-light so it does not wash colours out.
     let noise = CIFilter(name: "CIRandomGenerator")!.outputImage!.cropped(to: extent).settingAlphaOne(in: extent)
@@ -670,6 +775,39 @@ func renderBackground(_ p: Palette, w: Int, h: Int, seed: UInt64) -> CGImage {
         ]).cropped(to: extent)
     img = noise.applyingFilter("CISoftLightBlendMode", parameters: [kCIInputBackgroundImageKey: img])
     return ciContext.createCGImage(img, from: extent, format: .RGBA8, colorSpace: sRGB)!
+}
+
+/// Faint rain streaks or snow specks drawn over the background, under the text.
+func drawPrecipitation(_ ctx: CGContext, kind: String, intensity: CGFloat, light: Bool, W: CGFloat, H: CGFloat, seed: UInt64) {
+    guard ["rain", "storm", "snow"].contains(kind) else { return }
+    var rng = SplitMix(state: seed ^ 0x5EED_F00D)
+    let unit = max(1, H / 900)
+    if kind == "snow" {
+        // White flakes with a faint soft halo so they read on pale backgrounds too.
+        let n = Int(W * H / 6000 * intensity)
+        for _ in 0..<n {
+            let r = H * rng.range(0.0012, 0.0036)
+            let a = rng.range(0.55, 0.95)
+            let c = CGPoint(x: rng.range(0, W), y: rng.range(0, H))
+            ctx.setFillColor(cgColor(light ? "#8EA3BF" : "#FFFFFF", light ? 0.10 : 0.12))
+            ctx.fillEllipse(in: CGRect(x: c.x - r * 2.2, y: c.y - r * 2.2, width: r * 4.4, height: r * 4.4))
+            ctx.setFillColor(CGColor(gray: 1, alpha: a))
+            ctx.fillEllipse(in: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
+        }
+    } else {
+        let n = Int(W * H / 6000 * intensity * (kind == "storm" ? 1.4 : 1))
+        ctx.setLineCap(.round)
+        for _ in 0..<n {
+            let x = rng.range(0, W), y = rng.range(0, H)
+            let len = H * rng.range(0.018, 0.05)
+            let a = rng.range(0.10, 0.26)
+            ctx.setStrokeColor(light ? cgColor("#3C4E66", a) : CGColor(gray: 1, alpha: a))
+            ctx.setLineWidth(unit * rng.range(0.6, 1.2))
+            ctx.move(to: CGPoint(x: x, y: y))
+            ctx.addLine(to: CGPoint(x: x - len * 0.18, y: y - len))
+            ctx.strokePath()
+        }
+    }
 }
 
 // MARK: - Text
@@ -704,13 +842,18 @@ func render(_ p: Palette, weather: Weather?, w: Int, h: Int) -> CGImage {
     let W = CGFloat(w), H = CGFloat(h)
     let cal = Calendar(identifier: .gregorian)
     let comps = cal.dateComponents([.year, .month, .day], from: date)
-    let seed = UInt64(comps.year! * 10000 + comps.month! * 100 + comps.day!) &* 2654435761 &+ UInt64(p.name.hashValue & 0xFFFF)
-    let bg = renderBackground(p, w: w, h: h, seed: seed)
+    // Same layout all day (stable seed from the date), drifting slowly with the time of day.
+    let seed = UInt64(comps.year! * 10000 + comps.month! * 100 + comps.day!) &* 2654435761
+    let dayStart = Calendar.current.startOfDay(for: now)
+    let drift = CGFloat(now.timeIntervalSince(dayStart) / 86400)
+    let bg = renderBackground(p, w: w, h: h, seed: seed, drift: drift, fog: fxKind == "fog")
 
     let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: sRGB,
                         bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)!
     ctx.draw(bg, in: CGRect(x: 0, y: 0, width: W, height: H))
     ctx.setShouldSmoothFonts(false)
+    drawPrecipitation(ctx, kind: fxKind, intensity: fxIntensity, light: luminance(p.base) > 0.5, W: W, H: H,
+                      seed: seed ^ UInt64(Int(now.timeIntervalSince1970 / 900)))
 
     let dark = luminance(p.base) < 0.2
     let ink = dark ? "#F3F0EA" : "#121212"
@@ -743,7 +886,7 @@ func render(_ p: Palette, weather: Weather?, w: Int, h: Int) -> CGImage {
     let cs = min(H * 0.0449, (colW - 2 * pad) / 7.1)
     let rs = H * 0.0385
     func rowTop(_ r: Int) -> CGFloat { bottom - capSmall - CGFloat(rows - r) * rs }
-    for (j, d) in ["M", "T", "W", "T", "F", "S", "S"].enumerated() {
+    for (j, d) in (nb ? ["M", "T", "O", "T", "F", "L", "S"] : ["M", "T", "W", "T", "F", "S", "S"]).enumerated() {
         draw(ctx, d, font: fMed, color: inkC, x: xs[0] + pad + CGFloat(j) * cs, capTop: rowTop(0), H: H)
     }
     let isToday = cal.isDate(date, inSameDayAs: now) || arg("--date") != nil
@@ -766,7 +909,7 @@ func render(_ p: Palette, weather: Weather?, w: Int, h: Int) -> CGImage {
 
     // Column B — ISO week + giant day number
     let week = Calendar(identifier: .iso8601).component(.weekOfYear, from: date)
-    draw(ctx, "Week \(week)", font: fMed, color: inkC, x: xs[1] + pad, capTop: textTop, H: H)
+    draw(ctx, "\(L("Week")) \(week)", font: fMed, color: inkC, x: xs[1] + pad, capTop: textTop, H: H)
 
     // Column B hero. Returns the cap-top (down coords) of the big text.
     @discardableResult
@@ -802,7 +945,7 @@ func render(_ p: Palette, weather: Weather?, w: Int, h: Int) -> CGImage {
         let delta = Int(((len - (yesterday.map { $0.set.timeIntervalSince($0.rise) } ?? len)) / 60).rounded())
         let mins = Int((len / 60).rounded())
         let bigTop = bigText("\(mins / 60):" + String(format: "%02d", mins % 60))
-        caption(["Daylight", "\(delta >= 0 ? "+" : "−")\(abs(delta)) min since yesterday"])
+        caption([L("Daylight"), "\(delta >= 0 ? "+" : "−")\(abs(delta)) \(L("min since yesterday"))"])
 
         if let t = today {
             let horizon = bigTop - H * 0.07
@@ -829,9 +972,9 @@ func render(_ p: Palette, weather: Weather?, w: Int, h: Int) -> CGImage {
         let p = moonPhase(now)
         let illum = Int(((1 - cos(2 * .pi * p)) / 2 * 100).rounded())
         let daysToFull = Int(((0.5 - p + (p > 0.5 ? 1 : 0)) * synodic).rounded())
-        let fullF = DateFormatter(); fullF.locale = Locale(identifier: "en_US"); fullF.dateFormat = "MMM d"
-        caption([moonName(p), "\(illum)% illuminated",
-                 daysToFull == 0 ? "Full moon tonight" : "Full moon \(fullF.string(from: now.addingTimeInterval(Double(daysToFull) * 86400)))"])
+        let fullF = DateFormatter(); fullF.locale = uiLocale; fullF.setLocalizedDateFormatFromTemplate("MMMd")
+        caption([L(moonName(p)), "\(illum)% \(L("illuminated"))",
+                 daysToFull == 0 ? L("Full moon tonight") : "\(L("Full moon")) \(fullF.string(from: now.addingTimeInterval(Double(daysToFull) * 86400)))"])
         let r = min(colW * 0.40, (bottom - captionBottom(3) - H * 0.08) / 2)
         let c = CGPoint(x: cx, y: H - (bottom - r))
         ctx.setFillColor(inkA(0.07)); ctx.fillEllipse(in: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
@@ -861,17 +1004,17 @@ func render(_ p: Palette, weather: Weather?, w: Int, h: Int) -> CGImage {
             let mins = Int(m.start.timeIntervalSince(now) / 60)
             let when: String
             if cal.isDateInToday(m.start) {
-                when = mins < 60 ? "In \(mins) min" : "In \(mins / 60) h \(mins % 60) min"
+                when = mins < 60 ? "\(capFirst(L("in"))) \(mins) min" : "\(capFirst(L("in"))) \(mins / 60) \(nb ? "t" : "h") \(mins % 60) min"
             } else if cal.isDateInTomorrow(m.start) {
-                when = "Tomorrow"
+                when = L("Tomorrow")
             } else {
-                let wf = DateFormatter(); wf.locale = Locale(identifier: "en_US"); wf.dateFormat = "EEEE"
-                when = wf.string(from: m.start)
+                let wf = DateFormatter(); wf.locale = uiLocale; wf.dateFormat = "EEEE"
+                when = capFirst(wf.string(from: m.start))
             }
-            caption(["Next meeting · \(when)", m.title])
+            caption(["\(L("Next meeting")) · \(when)", m.title])
         } else {
-            bigText("Free")
-            caption(["No more meetings", agenda?.heading.lowercased() ?? "this week"])
+            bigText(L("Free"))
+            caption([L("No more meetings"), (agenda?.heading ?? L("This week")).lowercased()])
         }
 
     case "year":
@@ -879,14 +1022,15 @@ func render(_ p: Palette, weather: Weather?, w: Int, h: Int) -> CGImage {
         let doy = cal.ordinality(of: .day, in: .year, for: date)!
         let total = cal.range(of: .day, in: .year, for: date)!.count
         bigText("\(Int((Double(doy) / Double(total) * 100).rounded()))%")
-        caption(["of \(comps.year!) has passed", "Day \(doy) of \(total) · \(total - doy) left"])
+        caption(nb ? ["av \(comps.year!) er gått", "Dag \(doy) av \(total) · \(total - doy) igjen"]
+                   : ["of \(comps.year!) has passed", "Day \(doy) of \(total) · \(total - doy) left"])
 
     default:
         // Day number with the weekday spelled out beneath it, left-aligned on the column's bottom line.
-        let wf = DateFormatter(); wf.locale = Locale(identifier: "en_US"); wf.dateFormat = "EEEE"
+        let wf = DateFormatter(); wf.locale = uiLocale; wf.dateFormat = "EEEE"
         let fDay = ctFont("HelveticaNeue-Light", H * 0.043)
         let dayCap = CTFontGetCapHeight(fDay)
-        draw(ctx, wf.string(from: date), font: fDay, color: inkC, x: xs[1] + pad, capTop: bottom - dayCap, H: H,
+        draw(ctx, capFirst(wf.string(from: date)), font: fDay, color: inkC, x: xs[1] + pad, capTop: bottom - dayCap, H: H,
              kern: -H * 0.0004)
         let s = String(comps.day!)
         let probe = ctFont("HelveticaNeue-Light", 100)
@@ -911,7 +1055,7 @@ func render(_ p: Palette, weather: Weather?, w: Int, h: Int) -> CGImage {
         let valueRight = left + (right - left) * 0.68
         func rTop(_ r: Int) -> CGFloat { bottom - capSmall - CGFloat(quotes.count - r) * rs }
         let tf = DateFormatter(); tf.dateFormat = "HH:mm"
-        draw(ctx, "Markets", font: fMed, color: inkC, x: left, capTop: rTop(0), H: H)
+        draw(ctx, L("Markets"), font: fMed, color: inkC, x: left, capTop: rTop(0), H: H)
         draw(ctx, tf.string(from: now), font: fMed, color: inkA(0.55), x: right, capTop: rTop(0), H: H, align: .right)
         for (i, q) in quotes.enumerated() {
             let y = rTop(i + 1)
@@ -924,36 +1068,38 @@ func render(_ p: Palette, weather: Weather?, w: Int, h: Int) -> CGImage {
     // Column D — weather, month, weekday
     if let wx = weather, let t = wx.tempC {
         var lines = ["\(t)°  \(wx.desc)"]
-        if let f = wx.feelsC, f != t { lines.append("Feels like \(f)°") }
+        if let f = wx.feelsC, f != t { lines.append("\(L("Feels like")) \(f)°") }
         if !wx.area.isEmpty { lines.append(wx.area) }
+        if let note = auroraNote { lines.append(note) }
         for (i, s) in lines.enumerated() {
             draw(ctx, s, font: fMed, color: inkC, x: xs[3] + pad, capTop: textTop + CGFloat(i) * lead, H: H)
         }
     }
-    let monthF = DateFormatter(); monthF.locale = Locale(identifier: "en_US"); monthF.dateFormat = "MMMM"
-    let dayF = DateFormatter(); dayF.locale = Locale(identifier: "en_US"); dayF.dateFormat = "EEEE"
+    let monthF = DateFormatter(); monthF.locale = uiLocale; monthF.dateFormat = "LLLL"
+    let dayF = DateFormatter(); dayF.locale = uiLocale; dayF.dateFormat = "EEEE"
     let fMonth = ctFont("HelveticaNeue-Light", H * 0.043)
-    draw(ctx, monthF.string(from: date), font: fMonth, color: inkC, x: xs[3] + pad, capTop: H * 0.382, H: H,
+    draw(ctx, capFirst(monthF.string(from: date)), font: fMonth, color: inkC, x: xs[3] + pad, capTop: H * 0.382, H: H,
          kern: -H * 0.0004)
     _ = dayF  // weekday now lives under the day number in column B
     let weekdayTop = H * 0.382 + CTFontGetCapHeight(fMonth) + H * 0.022
 
     // Column D bottom — the week's meetings, bottom-aligned with the calendar
     if let agenda {
-        enum Row { case title(String), day(String, Bool), item(String, String, CGFloat, Bool) }
+        enum Row { case title(String), day(String, Bool), item(String, String, CGFloat, Bool, String?) }
         var rows: [Row] = [.title(agenda.heading)]
         let cal = Calendar.current
-        let dayLabel = DateFormatter(); dayLabel.locale = Locale(identifier: "en_US"); dayLabel.dateFormat = "EEEE d"
+        let dayLabel = DateFormatter(); dayLabel.locale = uiLocale; dayLabel.dateFormat = "EEEE d"
         let hm = DateFormatter(); hm.dateFormat = "HH:mm"
         let nextIdx = agenda.meetings.firstIndex { $0.end > now && !$0.allDay }
         var lastDay: Date?
         for (i, m) in agenda.meetings.enumerated() {
             let d = cal.startOfDay(for: m.start)
-            if d != lastDay { rows.append(.day(dayLabel.string(from: d), cal.isDate(d, inSameDayAs: now))); lastDay = d }
+            if d != lastDay { rows.append(.day(capFirst(dayLabel.string(from: d)), cal.isDate(d, inSameDayAs: now))); lastDay = d }
             let alpha: CGFloat = m.end <= now ? 0.4 : (m.free ? 0.6 : 1)
-            rows.append(.item(m.allDay ? "All day" : hm.string(from: m.start), m.title, alpha, i == nextIdx))
+            rows.append(.item(m.allDay ? L("All day") : hm.string(from: m.start), m.title, alpha, i == nextIdx,
+                              i == nextIdx ? reminderBadge(m) : nil))
         }
-        if agenda.meetings.isEmpty { rows.append(.item("", "No meetings", 0.6, false)) }
+        if agenda.meetings.isEmpty { rows.append(.item("", L("No meetings"), 0.6, false, nil)) }
 
         let lead = small * 1.6, dayGap = small * 1.2
         func height(_ r: Row, first: Bool) -> CGFloat {
@@ -975,11 +1121,16 @@ func render(_ p: Palette, weather: Weather?, w: Int, h: Int) -> CGImage {
                 draw(ctx, s, font: fMed, color: inkC, x: left, capTop: y, H: H)
             case .day(let s, let today):
                 draw(ctx, s, font: today ? fBold : fMed, color: inkA(today ? 1 : 0.8), x: left, capTop: y, H: H)
-            case .item(let t, let title, let a, let bold):
+            case .item(let t, let title, let a, let bold, let badge):
                 let f = bold ? fBold : fMed
                 draw(ctx, t, font: f, color: inkA(a), x: left, capTop: y, H: H)
+                var badgeW: CGFloat = 0
+                if let badge {
+                    badgeW = lineWidth(makeLine(badge, fBold, inkC)) + small * 1.0
+                    draw(ctx, badge, font: fBold, color: inkC, x: right, capTop: y, H: H, align: .right)
+                }
                 let full = makeLine(title, f, inkA(a))
-                let line = CTLineCreateTruncatedLine(full, Double(right - left - timeW), .end,
+                let line = CTLineCreateTruncatedLine(full, Double(right - left - timeW - badgeW), .end,
                                                      makeLine("…", f, inkA(a))) ?? full
                 ctx.textPosition = CGPoint(x: left + timeW, y: H - (y + CTFontGetCapHeight(f)))
                 CTLineDraw(line, ctx)
@@ -996,7 +1147,183 @@ func writeJPEG(_ img: CGImage, to url: URL) -> Bool {
     return CGImageDestinationFinalize(dest)
 }
 
+// MARK: - Colour blending (sky + time-of-day tints)
+
+func hexString(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> String {
+    func c(_ v: CGFloat) -> Int { Int((min(max(v, 0), 1) * 255).rounded()) }
+    return String(format: "#%02X%02X%02X", c(r), c(g), c(b))
+}
+func mix(_ a: String, _ b: String, _ t: CGFloat) -> String {
+    let (r1, g1, b1) = rgb(a), (r2, g2, b2) = rgb(b)
+    return hexString(r1 + (r2 - r1) * t, g1 + (g2 - g1) * t, b1 + (b2 - b1) * t)
+}
+func clamp01(_ x: Double) -> CGFloat { CGFloat(min(max(x, 0), 1)) }
+func smoothstep(_ t: CGFloat) -> CGFloat { t * t * (3 - 2 * t) }
+
+func blend(_ a: Palette, _ b: Palette, _ t: CGFloat) -> Palette {
+    let named = t < 0.5 ? a : b
+    var ys: [CGFloat]? = nil
+    if let ya = a.ys, let yb = b.ys { ys = zip(ya, yb).map { $0 + ($1 - $0) * t } }
+    return Palette(name: named.name, hex: named.hex, words: named.words, base: mix(a.base, b.base, t),
+                   blobs: zip(a.blobs, b.blobs).map { mix($0, $1, t) }, tags: named.tags, ys: ys)
+}
+
+func tint(_ p: Palette, toward c: String, _ amount: CGFloat) -> Palette {
+    guard amount > 0 else { return p }
+    return Palette(name: p.name, hex: p.hex, words: p.words, base: mix(p.base, c, amount),
+                   blobs: p.blobs.map { mix($0, c, amount) }, tags: p.tags, ys: p.ys)
+}
+
+/// Clear sky colour for a solar elevation, blended smoothly between keyframes.
+func skyPalette(elevation e: Double, morning: Bool) -> Palette {
+    let frames: [(Double, Palette)] = [
+        (-2, skyBlueHour), (3, morning ? skyFirstLight : skyGoldenHour), (12, skyLowSun), (28, skyHighSun),
+    ]
+    if e <= frames[0].0 { return frames[0].1 }
+    for i in 0..<(frames.count - 1) where e < frames[i + 1].0 {
+        let t = smoothstep(clamp01((e - frames[i].0) / (frames[i + 1].0 - frames[i].0)))
+        return blend(frames[i].1, frames[i + 1].1, t)
+    }
+    return frames[frames.count - 1].1
+}
+
+/// Other weather keeps its colour family but warms up around sunrise/sunset and dims through dusk.
+func sunTinted(_ p: Palette, elevation e: Double, morning: Bool) -> Palette {
+    let warm = e >= 0 ? 0.30 * clamp01(1 - e / 8) : 0.30 * clamp01(1 + e / 3)
+    var q = tint(p, toward: morning ? "#D9A3B0" : "#DC9C72", warm)
+    if e < 0 { q = tint(q, toward: "#2B3460", 0.6 * clamp01(-e / 6)) }
+    return q
+}
+
+// MARK: - Meeting reminder
+
+/// "in 10 min" / "now" for the next meeting once it's close. Rounded up to 5 min to match the refresh.
+func reminderBadge(_ m: Meeting) -> String? {
+    if m.allDay { return nil }
+    if m.start <= now && now < m.end { return L("now") }
+    let mins = Int(ceil(m.start.timeIntervalSince(now) / 60))
+    guard mins > 0, mins <= 15 else { return nil }
+    return "\(L("in")) \(Int(ceil(Double(mins) / 5)) * 5) min"
+}
+
+// MARK: - Aurora (NOAA SWPC planetary Kp forecast, cached 1 h)
+
+/// Highest forecast Kp from 3 hours ago to 12 hours ahead.
+func fetchKp() -> Double? {
+    let cache = appDir.appendingPathComponent("kp.json")
+    var data: Data?
+    if let mod = (try? fm.attributesOfItem(atPath: cache.path))?[.modificationDate] as? Date,
+       Date().timeIntervalSince(mod) < 3600 {
+        data = try? Data(contentsOf: cache)
+    }
+    if data == nil, let url = URL(string: "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"),
+       let d = httpGet(url) {
+        data = d
+        try? d.write(to: cache)
+    }
+    if data == nil { data = try? Data(contentsOf: cache) }
+    guard let data, let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = TimeZone(identifier: "UTC"); f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+    let from = now.addingTimeInterval(-3 * 3600), to = now.addingTimeInterval(12 * 3600)
+    return rows.compactMap { r -> Double? in
+        guard let t = f.date(from: r["time_tag"] as? String ?? ""), t >= from, t <= to else { return nil }
+        return (r["kp"] as? NSNumber)?.doubleValue
+    }.max()
+}
+
+// MARK: - Dark mode sync (DAYWALL_DARK_MODE=1)
+
+/// Switches macOS to dark mode after sunset and back at sunrise. Only acts when the wanted state
+/// changes, so flipping it yourself during the day sticks until the next sunrise/sunset.
+func syncDarkMode(wantDark: Bool) {
+    let state = appDir.appendingPathComponent("last-appearance")
+    let want = wantDark ? "dark" : "light"
+    guard (try? String(contentsOf: state, encoding: .utf8)) != want else { return }
+    try? want.write(to: state, atomically: true, encoding: .utf8)
+    var err: NSDictionary?
+    NSAppleScript(source: "tell application \"System Events\" to tell appearance preferences to set dark mode to \(wantDark)")?
+        .executeAndReturnError(&err)
+    if let err {
+        log("dark mode switch failed; allow daywall under Privacy & Security → Automation → System Events (\(err))")
+    } else {
+        log("switched to \(want) mode")
+    }
+}
+
+// MARK: - Watcher (--watch) and Space re-apply (--reapply)
+
+let wallpaperOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
+    .imageScaling: NSImageScaling.scaleProportionallyUpOrDown.rawValue,
+    .allowClipping: true,
+]
+
+/// macOS only changes the wallpaper of the Space you're on, so re-apply the latest images when you switch.
+func reapplyLast() {
+    guard let s = try? String(contentsOf: appDir.appendingPathComponent("last-files"), encoding: .utf8) else { return }
+    let paths = s.components(separatedBy: "\n")
+    for (i, screen) in NSScreen.screens.enumerated() where i < paths.count && !paths[i].isEmpty {
+        let url = URL(fileURLWithPath: paths[i])
+        guard fm.fileExists(atPath: url.path), NSWorkspace.shared.desktopImageURL(for: screen) != url else { continue }
+        try? NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: wallpaperOptions)
+    }
+}
+
+/// Runs the one-shot renderer as a child process, one at a time.
+final class Watcher {
+    let exe: URL
+    var running = false
+    var pending: [String]?
+    init(exe: URL) { self.exe = exe }
+
+    func run(_ args: [String] = []) {
+        if running {
+            if pending == nil || args.isEmpty { pending = args }  // a full run beats a re-apply
+            return
+        }
+        running = true
+        let p = Process()
+        p.executableURL = exe
+        p.arguments = args
+        p.terminationHandler = { _ in
+            DispatchQueue.main.async {
+                self.running = false
+                if let next = self.pending { self.pending = nil; self.run(next) }
+            }
+        }
+        do { try p.run() } catch { running = false; log("could not start renderer: \(error)") }
+    }
+}
+
+/// Stays running (launched by the LaunchAgent): redraws every 5 minutes, after wake and when
+/// displays change, and re-applies the current images when you switch Space.
+func runWatcher() -> Never {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.prohibited)
+    let w = Watcher(exe: Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
+    let ws = NSWorkspace.shared.notificationCenter
+    ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { w.run() }  // give the network a moment
+    }
+    ws.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { _ in w.run() }
+    ws.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { _ in
+        w.run(["--reapply"])
+    }
+    NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                           object: nil, queue: .main) { _ in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { w.run() }
+    }
+    Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in w.run() }
+    log("watching: every 5 min, after wake, on display and Space changes")
+    w.run()
+    app.run()
+    exit(0)
+}
+
 // MARK: - Main
+
+if argv.contains("--watch") { runWatcher() }
+if argv.contains("--reapply") { reapplyLast(); exit(0) }
 
 let weather = fetchWeather()
 let quotes = fetchQuotes()
@@ -1010,36 +1337,64 @@ let agenda: (heading: String, meetings: [Meeting])? = {
     let weekend = [1, 7].contains(Calendar.current.component(.weekday, from: date))
     let base = weekend ? cal.date(byAdding: .day, value: 2, to: date)! : date
     guard let week = cal.dateInterval(of: .weekOfYear, for: base) else { return nil }
-    return (weekend ? "Next week" : "This week", meetings(from: ics, in: week))
+    return (weekend ? L("Next week") : L("This week"), meetings(from: ics, in: week))
 }()
-var cat = arg("--weather") ?? weather.map { $0.cat ?? category($0.code) } ?? "clear"
-var night: Bool = {
-    if argv.contains("--night") { return true }
-    if argv.contains("--day") { return false }
-    if let sr = weather?.sunrise, let ss = weather?.sunset { return now < sr || now > ss }
-    let h = Calendar.current.component(.hour, from: now); return h < 7 || h >= 19
-}()
+
+if argv.contains("--dump-agenda") {
+    let f = DateFormatter(); f.dateFormat = "EEE yyyy-MM-dd HH:mm"
+    for m in agenda?.meetings ?? [] { print(f.string(from: m.start), m.allDay ? "(all day)" : "", m.title) }
+    exit(0)
+}
+
+let cat = arg("--weather") ?? weather.map { $0.cat ?? category($0.code) } ?? "clear"
+let lat = weather?.lat ?? 59.91, lon = weather?.lon ?? 10.75
+let sun = sunPosition(at: now, lat: lat, lon: lon)
+let elevation = argv.contains("--day") ? max(sun.elevation, 20) : sun.elevation
+let night = argv.contains("--night") || (!argv.contains("--day") && sun.elevation < -6)
 let dayNumber = Calendar.current.ordinality(of: .day, in: .era, for: date) ?? 0
 
-// Clear skies follow the sun: blue hour → first light / golden hour → low sun → high sun.
-let sun = sunPosition(at: now, lat: weather?.lat ?? 59.91, lon: weather?.lon ?? 10.75)
-let skyPalette: Palette? = {
-    guard cat == "clear", !argv.contains("--night") else { return nil }
-    switch sun.elevation {
-    case ..<(-6): return nil  // proper night
-    case ..<0: return skyBlueHour
-    case ..<8: return sun.morning ? skyFirstLight : skyGoldenHour
-    case ..<25: return skyLowSun
-    default: return skyHighSun
-    }
+// Aurora: the Kp needed depends on how far north you are (Oslo ≈ Kp 4 for "possible").
+let kp: Double? = arg("--kp").flatMap { Double($0) } ?? fetchKp()
+let auroraLevel: Int = {
+    guard let kp, abs(lat) >= 45 else { return 0 }
+    let needed = max(1, (67 - abs(lat)) / 1.75)
+    return kp >= needed + 1 ? 2 : kp >= needed ? 1 : 0
 }()
-if skyPalette != nil { night = false }
-if cat == "clear", sun.elevation < -6, !argv.contains("--day") { night = true }
+let auroraNote: String? = auroraLevel == 0 ? nil
+    : "\(L(auroraLevel == 2 ? "Aurora likely tonight" : "Aurora possible tonight")) · Kp \(Int(kp!.rounded()))"
 
-let tag = skyPalette.map { $0.name.lowercased().replacingOccurrences(of: " ", with: "-") } ?? (night ? "night" : cat)
-var candidates = palettes.filter { $0.tags.contains(night ? "night" : cat) }
-if candidates.isEmpty { candidates = palettes.filter { $0.tags.contains("clear") } }
-let palette = skyPalette ?? candidates[dayNumber % candidates.count]
+// Colour: night palettes after dark (Aurora Night when it's likely and the sky is clear),
+// the sun-following sky on clear days, otherwise the weather family tinted by the time of day.
+let palette: Palette
+let tag: String
+if night {
+    let nights = palettes.filter { $0.tags.contains("night") }
+    let showAurora = auroraLevel == 2 && ["clear", "partly"].contains(cat)
+    palette = showAurora ? (nights.first { $0.name == "Aurora Night" } ?? nights[0]) : nights[dayNumber % nights.count]
+    tag = "night"
+} else if cat == "clear" {
+    palette = skyPalette(elevation: elevation, morning: sun.morning)
+    tag = "sky"
+} else {
+    var family = palettes.filter { $0.tags.contains(cat) }
+    if family.isEmpty { family = palettes.filter { $0.tags.contains("clear") } }
+    palette = sunTinted(family[dayNumber % family.count], elevation: elevation, morning: sun.morning)
+    tag = cat
+}
+
+// Weather texture: rain streaks, snow specks, fog softening.
+let fxKind = arg("--fx") ?? cat
+let fxIntensity: CGFloat = {
+    let d = (weather?.desc ?? "").lowercased()
+    if d.contains("heavy") || d.contains("kraftig") { return 1.6 }
+    if d.contains("light") || d.contains("lett") { return 0.6 }
+    return 1
+}()
+
+let darkModeOn = ["1", "true", "yes", "auto"].contains((ProcessInfo.processInfo.environment["DAYWALL_DARK_MODE"] ?? "").lowercased())
+if previewDir == nil, darkModeOn {
+    syncDarkMode(wantDark: argv.contains("--night") || (!argv.contains("--day") && sun.elevation < -0.833))
+}
 
 // Targets: real screens, or a single fake size for previews.
 var targets: [(NSScreen?, Int, Int)] = []
@@ -1054,15 +1409,17 @@ if let size = arg("--size") {
 }
 
 let dayKey = Calendar.current.dateComponents([.year, .month, .day], from: date)
+let meetingSoon = (agenda?.meetings ?? []).contains { reminderBadge($0) != nil }
 let sigParts: [String] = [
     "\(dayKey.year!)-\(dayKey.month!)-\(dayKey.day!)",
-    palette.name,
+    palette.name + palette.base,
     "\(weather?.tempC ?? 0)/\(weather?.feelsC ?? 0)/\(weather?.desc ?? "")",
     quotes.map { formatPrice($0) + formatChange($0) }.joined(separator: ","),
     (agenda?.meetings ?? []).map { m -> String in "\(m.start.timeIntervalSince1970)\(m.title)\(m.end <= now)" }.joined(),
     targets.map { t -> String in "\(t.1)x\(t.2)" }.joined(separator: ","),
-    // daylight (sun position) and next (countdown) change during the day
-    hero + (["daylight", "next"].contains(hero) ? "\(Int(now.timeIntervalSince1970 / 900))" : ""),
+    hero, auroraNote ?? "",
+    "\(Int(now.timeIntervalSince1970 / 900))",  // slow drift + sky blend: redraw every 15 min
+    meetingSoon ? "\(Int(now.timeIntervalSince1970 / 300))" : "",  // reminder counts down in 5 min steps
 ]
 let signature = sigParts.joined(separator: "|")
 let stateFile = appDir.appendingPathComponent("last-signature")
@@ -1071,23 +1428,21 @@ if previewDir == nil, !force, (try? String(contentsOf: stateFile, encoding: .utf
 }
 
 let stamp = Int(now.timeIntervalSince1970)
-var written: Set<String> = []
+let hhmm = { () -> String in let f = DateFormatter(); f.dateFormat = "HHmm"; return f.string(from: now) }()
+var written: [String] = []
 for (i, t) in targets.enumerated() {
     let img = render(palette, weather: weather, w: t.1, h: t.2)
     if let dir = previewDir {
-        let url = URL(fileURLWithPath: dir).appendingPathComponent("daywall-\(t.1)x\(t.2)-\(tag)-\(hero).jpg")
+        let url = URL(fileURLWithPath: dir).appendingPathComponent("daywall-\(t.1)x\(t.2)-\(tag)-\(hero)-\(hhmm).jpg")
         _ = writeJPEG(img, to: url)
         print(url.path)
         continue
     }
     let url = appDir.appendingPathComponent("wall-\(i)-\(stamp).jpg")
-    guard writeJPEG(img, to: url), let screen = t.0 else { log("failed to write \(url.path)"); continue }
-    written.insert(url.lastPathComponent)
+    guard writeJPEG(img, to: url), let screen = t.0 else { log("failed to write \(url.path)"); written.append(""); continue }
+    written.append(url.path)
     do {
-        try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: [
-            .imageScaling: NSImageScaling.scaleProportionallyUpOrDown.rawValue,
-            .allowClipping: true,
-        ])
+        try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: wallpaperOptions)
     } catch {
         log("setDesktopImageURL failed: \(error)")
     }
@@ -1095,12 +1450,14 @@ for (i, t) in targets.enumerated() {
 
 if previewDir == nil {
     try? signature.write(to: stateFile, atomically: true, encoding: .utf8)
-    // Clean up old renders (keep a day's worth so other Spaces don't lose their image abruptly).
+    try? written.joined(separator: "\n").write(to: appDir.appendingPathComponent("last-files"), atomically: true, encoding: .utf8)
+    // Clean up old renders, keeping a few hours' worth.
+    let keep = Set(written.map { URL(fileURLWithPath: $0).lastPathComponent })
     if let files = try? fm.contentsOfDirectory(at: appDir, includingPropertiesForKeys: [.contentModificationDateKey]) {
-        for f in files where f.lastPathComponent.hasPrefix("wall-") && !written.contains(f.lastPathComponent) {
+        for f in files where f.lastPathComponent.hasPrefix("wall-") && !keep.contains(f.lastPathComponent) {
             let mod = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-            if now.timeIntervalSince(mod) > 6 * 3600 { try? fm.removeItem(at: f) }
+            if Date().timeIntervalSince(mod) > 3 * 3600 { try? fm.removeItem(at: f) }
         }
     }
-    log("set \(palette.name) (\(tag)) on \(written.count) screen(s)")
+    log("set \(palette.name) (\(tag), sun \(Int(sun.elevation.rounded()))°) on \(written.filter { !$0.isEmpty }.count) screen(s)")
 }
