@@ -6,7 +6,9 @@ A calendar wallpaper for macOS that changes colour with the day and the weather.
 
 I saw a wallpaper like this and wanted one that kept itself up to date, so this renders a new one every 15 minutes with the month, the date, the weather, a couple of market prices and whatever meetings I have this week.
 
-The colour is picked by the weather: sunny days get warm yellows and corals, rainy days get teal and indigo, and after sunset it goes dark. The date then picks which colour within that family you get, so two cloudy days in a row don't look the same. Every colour comes with a name, a hex code and three words of questionable meaning, for example "Quiet, depth, patience".
+On clear days the colour follows the sun, so you get first light in the morning, blue sky while the sun is up, golden hour before sunset and blue hour right after, with the warm colours sitting low like a horizon. Any other weather picks a colour family instead, so cloudy days get soft greys and lilacs and rainy days get teal and indigo, and the date picks which colour within that family you get so two cloudy days in a row don't look the same. When it's properly dark it goes dark. Every colour comes with a name, a hex code and three words of questionable meaning, for example "Quiet, depth, patience".
+
+The weather comes from [MET Norway](https://api.met.no), which is the data behind yr.no and covers the whole world. Sunrise, sunset and how high the sun is are calculated locally.
 
 It is one swift file with no dependencies. It uses Core Image for the gradients, Core Text for the type, and Helvetica Neue because it already ships with macOS.
 
@@ -34,7 +36,7 @@ DAYWALL_HERO="digit" \
 ./install.sh
 ```
 
-- `DAYWALL_LOCATION` is the weather location, any city [wttr.in](https://wttr.in/:help) understands. It defaults to locating you by IP, which gets confused if you're on a VPN.
+- `DAYWALL_LOCATION` is the weather location, any city [wttr.in](https://wttr.in/:help) understands, which is only used to look up where you are. It defaults to locating you by IP, which gets confused if you're on a VPN.
 - `DAYWALL_ICS` is the calendar feed for the week agenda. It gets saved to `~/Library/Application Support/Daywall/calendar-url`, which only you can read.
 - `DAYWALL_TICKERS` are `Label=Symbol` pairs using [Yahoo Finance](https://finance.yahoo.com) symbols. It defaults to Bitcoin and the Nasdaq 100.
 - `DAYWALL_HERO` is what goes in the second column. Your options are `digit` (the date and weekday, which is the default), `daylight` (hours of daylight and an arc showing where the sun is), `moon` (the moon phase), `next` (your next meeting) and `year` (how much of the year is gone, for when you need motivation).
@@ -54,11 +56,11 @@ To render to a folder without touching your wallpaper:
   --weather snow --night --date 2026-12-24 --hero moon
 ```
 
-`--force` redraws even when nothing has changed, and the log is in `~/Library/Application Support/Daywall/daywall.log`.
+`--at "2026-11-04 15:40"` pretends it's a specific moment, which is handy for seeing what golden hour looks like without waiting for it. `--force` redraws even when nothing has changed, and the log is in `~/Library/Application Support/Daywall/daywall.log`.
 
 ## Changing it
 
-Everything is in [`daywall.swift`](daywall.swift). The colours are in `palettes`, each with a name, hex, mood words, a base colour, the colours that get blurred together and which weather it belongs to. The layout is in `render`. Run `./install.sh` again afterwards to recompile.
+Everything is in [`daywall.swift`](daywall.swift). The colours are in `palettes`, each with a name, hex, mood words, a base colour, the colours that get blurred together and which weather it belongs to. The clear sky colours are the `sky…` palettes right below, which also say how high up on the screen each colour sits. The layout is in `render`. Run `./install.sh` again afterwards to recompile.
 
 ## Uninstall
 

@@ -31,7 +31,12 @@ func arg(_ name: String) -> String? {
 let force = argv.contains("--force")
 let previewDir = arg("--preview")
 
-let now = Date()
+/// `--at "yyyy-MM-dd HH:mm"` pretends it is that moment (for previews).
+let now: Date = {
+    guard let s = arg("--at") else { return Date() }
+    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm"; f.locale = Locale(identifier: "en_US_POSIX")
+    return f.date(from: s) ?? Date()
+}()
 var date = now
 if let d = arg("--date") {
     let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.locale = Locale(identifier: "en_US_POSIX")
@@ -52,7 +57,27 @@ struct Palette {
     let base: String
     let blobs: [String]
     let tags: Set<String>
+    /// Optional vertical position per blob (0 = bottom, 1 = top), used by the sky palettes
+    /// so the warm colours sit at the horizon and the blues overhead.
+    var ys: [CGFloat]? = nil
 }
+
+// Clear days follow the sun instead of the date: picked by solar elevation.
+let skyBlueHour = Palette(name: "Blue Hour", hex: "#2E3A6B", words: "Stillness, cool, in between",
+    base: "#2E3A6B", blobs: ["#141A3D", "#34427E", "#6C64A0", "#C2879A", "#E3A584"], tags: [],
+    ys: [1.05, 0.75, 0.42, 0.12, -0.08])
+let skyFirstLight = Palette(name: "First Light", hex: "#F2C6C2", words: "Waking, soft, promise",
+    base: "#C9C6E0", blobs: ["#8FA6D6", "#B4B6E0", "#F0C4C4", "#F7D7B0", "#FFF0DF"], tags: [],
+    ys: [1.05, 0.72, 0.38, 0.12, -0.08])
+let skyGoldenHour = Palette(name: "Golden Hour", hex: "#F2A070", words: "Warmth, glow, ending",
+    base: "#EBA880", blobs: ["#6E80BA", "#C48AAA", "#F09A6C", "#F6C064", "#FBE2AE"], tags: [],
+    ys: [1.08, 0.74, 0.40, 0.14, -0.08])
+let skyLowSun = Palette(name: "Low Sun", hex: "#A9C4E4", words: "Crisp, long shadows, clarity",
+    base: "#A9C4E4", blobs: ["#5A8CCE", "#86AFE0", "#C6DAEE", "#F1D2B6", "#F8E7D3"], tags: [],
+    ys: [1.05, 0.74, 0.46, 0.16, -0.06])
+let skyHighSun = Palette(name: "Clear Cerulean", hex: "#7FB7E0", words: "Clarity, distance, calm",
+    base: "#8FC0E6", blobs: ["#2F6FB5", "#4F8FD0", "#8FC0E6", "#D3E7F5", "#F4F1EA"], tags: [],
+    ys: [1.08, 0.80, 0.52, 0.22, -0.05])
 
 let palettes: [Palette] = [
     // Clear
@@ -112,13 +137,17 @@ let palettes: [Palette] = [
             base: "#18323F", blobs: ["#081419", "#2F5F7A", "#A07A4A", "#1F4450", "#0E222B"], tags: ["night"]),
 ]
 
-// MARK: - Weather (wttr.in, cached 30 min)
+// MARK: - Weather
+// Conditions come from MET Norway (api.met.no, the data behind yr.no; global, no key).
+// wttr.in is only used to turn DAYWALL_LOCATION / your IP into coordinates and a place name,
+// and as a fallback if MET is unreachable.
 
 struct Weather {
     var tempC: Int?
     var feelsC: Int?
     var desc: String = ""
     var code: Int = 113
+    var cat: String?  // set when conditions come from MET
     var area: String = ""
     var sunrise: Date?
     var sunset: Date?
@@ -145,6 +174,24 @@ func sunTimes(on day: Date, lat: Double, lon: Double) -> (rise: Date, set: Date)
     let w = acos(cosW) / rad
     func toDate(_ j: Double) -> Date { Date(timeIntervalSince1970: (j - 2440587.5) * 86400) }
     return (toDate(transit - w / 360), toDate(transit + w / 360))
+}
+
+/// Solar elevation in degrees and whether it is before solar noon.
+func sunPosition(at d: Date, lat: Double, lon: Double) -> (elevation: Double, morning: Bool) {
+    let rad = Double.pi / 180
+    func norm(_ x: Double) -> Double { let r = x.truncatingRemainder(dividingBy: 360); return r < 0 ? r + 360 : r }
+    let n = d.timeIntervalSince1970 / 86400 + 2440587.5 - 2451545.0
+    let l = norm(280.460 + 0.9856474 * n)
+    let g = norm(357.528 + 0.9856003 * n) * rad
+    let lambda = (l + 1.915 * sin(g) + 0.020 * sin(2 * g)) * rad
+    let eps = (23.439 - 0.0000004 * n) * rad
+    let ra = atan2(cos(eps) * sin(lambda), cos(lambda)) / rad
+    let dec = asin(sin(eps) * sin(lambda))
+    let gmst = norm(280.46061837 + 360.98564736629 * n)
+    var ha = norm(gmst + lon - ra)
+    if ha > 180 { ha -= 360 }  // negative = morning
+    let el = asin(sin(lat * rad) * sin(dec) + cos(lat * rad) * cos(dec) * cos(ha * rad)) / rad
+    return (el, ha < 0)
 }
 
 let synodic = 29.530588853
@@ -205,14 +252,79 @@ func fetchWeather() -> Weather? {
             w.lat = la; w.lon = lo
         }
     }
-    if let astro = ((root["weather"] as? [[String: Any]])?.first?["astronomy"] as? [[String: Any]])?.first {
-        let tf = DateFormatter(); tf.locale = Locale(identifier: "en_US_POSIX"); tf.dateFormat = "yyyy-MM-dd hh:mm a"
-        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd"
-        let day = df.string(from: Date())
-        if let s = astro["sunrise"] as? String { w.sunrise = tf.date(from: "\(day) \(s)") }
-        if let s = astro["sunset"] as? String { w.sunset = tf.date(from: "\(day) \(s)") }
+    if let sun = sunTimes(on: now, lat: w.lat, lon: w.lon) { w.sunrise = sun.rise; w.sunset = sun.set }
+    if let met = fetchMET(lat: w.lat, lon: w.lon) {
+        w.tempC = met.temp; w.feelsC = met.feels; w.desc = met.desc; w.cat = met.cat
     }
     return w
+}
+
+/// Current conditions from MET Norway locationforecast, cached 30 min.
+func fetchMET(lat: Double, lon: Double) -> (temp: Int, feels: Int, desc: String, cat: String)? {
+    let la = (lat * 10000).rounded() / 10000, lo = (lon * 10000).rounded() / 10000  // MET wants ≤ 4 decimals
+    let cache = appDir.appendingPathComponent("met.json")
+    func coordsMatch(_ root: [String: Any]) -> Bool {
+        guard let c = (root["geometry"] as? [String: Any])?["coordinates"] as? [Double], c.count >= 2 else { return false }
+        return abs(c[0] - lo) < 0.01 && abs(c[1] - la) < 0.01
+    }
+    var root: [String: Any]?
+    if let mod = (try? fm.attributesOfItem(atPath: cache.path))?[.modificationDate] as? Date,
+       Date().timeIntervalSince(mod) < 1800,
+       let d = try? Data(contentsOf: cache), let r = try? JSONSerialization.jsonObject(with: d) as? [String: Any], coordsMatch(r) {
+        root = r
+    }
+    if root == nil,
+       let url = URL(string: "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=\(la)&lon=\(lo)"),
+       let d = httpGet(url, userAgent: "daywall/1.0 github.com/bjornarvikhagen/daywall"),
+       let r = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+        root = r
+        try? d.write(to: cache)
+    }
+    if root == nil { log("MET fetch failed, falling back to wttr.in conditions") }
+    guard let series = ((root?["properties"] as? [String: Any])?["timeseries"] as? [[String: Any]]) else { return nil }
+
+    // Latest entry at or before now (the first one is normally the current hour).
+    let iso = ISO8601DateFormatter()
+    let entry = series.last { (iso.date(from: $0["time"] as? String ?? "") ?? .distantFuture) <= Date() } ?? series.first
+    guard let data = entry?["data"] as? [String: Any],
+          let details = (data["instant"] as? [String: Any])?["details"] as? [String: Any],
+          let t = details["air_temperature"] as? Double else { return nil }
+    let symbol = (((data["next_1_hours"] as? [String: Any])?["summary"] as? [String: Any])?["symbol_code"] as? String)
+        ?? (((data["next_6_hours"] as? [String: Any])?["summary"] as? [String: Any])?["symbol_code"] as? String) ?? "cloudy"
+
+    // Wind chill (Environment Canada / JAG-TI), valid at ≤ 10 °C and > 4.8 km/h.
+    let windKmh = (details["wind_speed"] as? Double ?? 0) * 3.6
+    var feels = t
+    if t <= 10 && windKmh > 4.8 {
+        let v = pow(windKmh, 0.16)
+        feels = 13.12 + 0.6215 * t - 11.37 * v + 0.3965 * t * v
+    }
+    let base = symbol.replacingOccurrences(of: "_day", with: "").replacingOccurrences(of: "_night", with: "")
+        .replacingOccurrences(of: "_polartwilight", with: "")
+    return (Int(t.rounded()), Int(feels.rounded()), metDescription(base), metCategory(base))
+}
+
+func metCategory(_ s: String) -> String {
+    if s.contains("thunder") { return "storm" }
+    if s.contains("snow") || s.contains("sleet") { return "snow" }
+    if s.contains("rain") { return "rain" }
+    switch s {
+    case "clearsky", "fair": return "clear"
+    case "partlycloudy": return "partly"
+    case "fog": return "fog"
+    default: return "cloudy"
+    }
+}
+
+func metDescription(_ s: String) -> String {
+    let fixed = ["clearsky": "Clear sky", "fair": "Fair", "partlycloudy": "Partly cloudy", "cloudy": "Cloudy", "fog": "Fog"]
+    if let f = fixed[s] { return f }
+    var d = s.replacingOccurrences(of: "andthunder", with: " and thunder")
+        .replacingOccurrences(of: "showers", with: " showers")
+        .replacingOccurrences(of: "light", with: "light ")
+        .replacingOccurrences(of: "heavy", with: "heavy ")
+    d = d.replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
+    return d.prefix(1).uppercased() + d.dropFirst()
 }
 
 // MARK: - Market quotes (Yahoo Finance chart API, cached 10 min)
@@ -228,9 +340,9 @@ struct Quote: Codable {
 
 final class DataBox: @unchecked Sendable { var data: Data? }
 
-func httpGet(_ url: URL) -> Data? {
+func httpGet(_ url: URL, userAgent: String = "Mozilla/5.0") -> Data? {
     var req = URLRequest(url: url, timeoutInterval: 12)
-    req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+    req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
     let box = DataBox(), sem = DispatchSemaphore(value: 0)
     URLSession.shared.dataTask(with: req) { d, r, _ in
         if (r as? HTTPURLResponse)?.statusCode == 200 { box.data = d }
@@ -535,7 +647,7 @@ func renderBackground(_ p: Palette, w: Int, h: Int, seed: UInt64) -> CGImage {
         // spread blobs across the width so the whole screen gets variation
         let slot = (CGFloat(k) + rng.range(0.1, 0.9)) / CGFloat(order.count)
         let x = (slot * 1.3 - 0.15) * W
-        let y = rng.range(-0.15, 1.15) * H
+        let y = (p.ys.map { $0[i] + rng.range(-0.05, 0.05) } ?? rng.range(-0.15, 1.15)) * H
         let r = rng.range(0.22, 0.40) * diag
         let g = CIFilter(name: "CIGaussianGradient", parameters: [
             "inputCenter": CIVector(x: x, y: y),
@@ -900,18 +1012,34 @@ let agenda: (heading: String, meetings: [Meeting])? = {
     guard let week = cal.dateInterval(of: .weekOfYear, for: base) else { return nil }
     return (weekend ? "Next week" : "This week", meetings(from: ics, in: week))
 }()
-var cat = arg("--weather") ?? weather.map { category($0.code) } ?? "clear"
+var cat = arg("--weather") ?? weather.map { $0.cat ?? category($0.code) } ?? "clear"
 var night: Bool = {
     if argv.contains("--night") { return true }
     if argv.contains("--day") { return false }
     if let sr = weather?.sunrise, let ss = weather?.sunset { return now < sr || now > ss }
     let h = Calendar.current.component(.hour, from: now); return h < 7 || h >= 19
 }()
-let tag = night ? "night" : cat
-var candidates = palettes.filter { $0.tags.contains(tag) }
-if candidates.isEmpty { candidates = palettes.filter { $0.tags.contains("clear") } }
 let dayNumber = Calendar.current.ordinality(of: .day, in: .era, for: date) ?? 0
-let palette = candidates[dayNumber % candidates.count]
+
+// Clear skies follow the sun: blue hour → first light / golden hour → low sun → high sun.
+let sun = sunPosition(at: now, lat: weather?.lat ?? 59.91, lon: weather?.lon ?? 10.75)
+let skyPalette: Palette? = {
+    guard cat == "clear", !argv.contains("--night") else { return nil }
+    switch sun.elevation {
+    case ..<(-6): return nil  // proper night
+    case ..<0: return skyBlueHour
+    case ..<8: return sun.morning ? skyFirstLight : skyGoldenHour
+    case ..<25: return skyLowSun
+    default: return skyHighSun
+    }
+}()
+if skyPalette != nil { night = false }
+if cat == "clear", sun.elevation < -6, !argv.contains("--day") { night = true }
+
+let tag = skyPalette.map { $0.name.lowercased().replacingOccurrences(of: " ", with: "-") } ?? (night ? "night" : cat)
+var candidates = palettes.filter { $0.tags.contains(night ? "night" : cat) }
+if candidates.isEmpty { candidates = palettes.filter { $0.tags.contains("clear") } }
+let palette = skyPalette ?? candidates[dayNumber % candidates.count]
 
 // Targets: real screens, or a single fake size for previews.
 var targets: [(NSScreen?, Int, Int)] = []
